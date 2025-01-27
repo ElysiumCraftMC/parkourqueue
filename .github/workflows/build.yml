@@ -6,7 +6,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install nightly --profile minimal
+      - run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
       - name: Upload artifact
