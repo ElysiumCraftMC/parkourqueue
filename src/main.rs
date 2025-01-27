@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,6 +19,8 @@ const BLOCK_TYPES: [BlockState; 1] = [BlockState::OBSIDIAN];
 pub fn main() {
     let velocity_secret = std::env::var("VELOCITY_SECRET").expect("Expected VELOCITY_SECRET env");
     let secret_arc = Arc::from(velocity_secret);
+    let address = std::env::var("ADDRESS").expect("Expected ADDRESS env");
+    let address: SocketAddr = address.parse().expect("Failed to parse ADDRESS");
 
     App::new()
         .insert_resource(ServerSettings {
@@ -27,6 +30,7 @@ pub fn main() {
         .insert_resource(NetworkSettings {
             connection_mode: ConnectionMode::Velocity { secret: secret_arc },
             max_players: i32::MAX as usize,
+            address,
             ..Default::default()
         })
         .add_plugins(DefaultPlugins)
