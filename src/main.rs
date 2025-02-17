@@ -9,6 +9,7 @@ use valence::prelude::*;
 use valence::protocol::sound::{Sound, SoundCategory};
 use valence::scoreboard::*;
 use valence::spawn::IsFlat;
+use valence::title::SetTitle;
 use valence::{CompressionThreshold, ServerSettings};
 
 const START_POS: BlockPos = BlockPos::new(0, 100, 0);
@@ -234,8 +235,7 @@ fn manage_blocks(
                     pitch,
                 );
 
-                client.set_title("");
-                client.set_subtitle(state.score.to_string().color(Color::LIGHT_PURPLE).bold());
+                client.set_action_bar(state.score.to_string().color(Color::LIGHT_PURPLE).bold());
                 let mut objective_mut = objectives.single_mut();
                 let name = username.to_string();
                 let new_score = state.score as i32;
