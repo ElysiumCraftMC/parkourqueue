@@ -11,9 +11,12 @@ use valence::entity::HeadYaw;
 use valence::entity::player::PlayerEntityBundle;
 use valence::player_list::{DisplayName, Listed, PlayerListEntryBundle};
 use valence::prelude::*;
-use valence::protocol::sound::{Sound, SoundCategory};
-use valence::protocol::packets::play::{TeamS2c, team_s2c::{CollisionRule, Mode, NameTagVisibility, TeamColor, TeamFlags}};
 use valence::protocol::WritePacket;
+use valence::protocol::packets::play::{
+    TeamS2c,
+    team_s2c::{CollisionRule, Mode, NameTagVisibility, TeamColor, TeamFlags},
+};
+use valence::protocol::sound::{Sound, SoundCategory};
 use valence::scoreboard::*;
 use valence::spawn::IsFlat;
 use valence::title::SetTitle;
@@ -192,7 +195,9 @@ fn init_clients(
         let layer = ChunkLayer::new(ident!("the_end"), &dimensions, &biomes, &server);
         let entity_layer = EntityLayer::new(&server);
 
-        commands.entity(entity).insert((state, layer, entity_layer, NoCollisionTeam));
+        commands
+            .entity(entity)
+            .insert((state, layer, entity_layer, NoCollisionTeam));
     }
 }
 
@@ -352,6 +357,7 @@ fn manage_blocks(
                     let original_seed = state.seed;
                     state.seed = highscore.seed;
                     state.rng = StdRng::seed_from_u64(highscore.seed);
+                    state.score = 0;
 
                     // Clear and regenerate the parkour with the highscore seed
                     for block in &state.blocks {
@@ -397,7 +403,14 @@ fn manage_blocks(
                             .as_millis(),
                     };
 
-                    let npc_entity = commands.spawn((entity_bundle, replay_component, GameMode::Spectator, NoCollisionTeam)).id();
+                    let npc_entity = commands
+                        .spawn((
+                            entity_bundle,
+                            replay_component,
+                            GameMode::Spectator,
+                            NoCollisionTeam,
+                        ))
+                        .id();
 
                     // Add replay mode component to the player with reference to the spawned NPC
                     commands.entity(entity).insert(ReplayMode {
@@ -672,11 +685,11 @@ fn setup_no_collision_team(
         .iter()
         .map(|(username, _)| username.0.clone())
         .collect();
-    
+
     if new_members.is_empty() {
         return;
     }
-    
+
     // Create team if it doesn't exist
     if !*team_created {
         let team_packet = TeamS2c {
@@ -692,14 +705,14 @@ fn setup_no_collision_team(
                 entities: vec![],
             },
         };
-        
+
         for mut client in &mut all_clients {
             client.write_packet(&team_packet);
         }
-        
+
         *team_created = true;
     }
-    
+
     // Add new members to the team
     let add_packet = TeamS2c {
         team_name: "no_collision",
@@ -707,7 +720,7 @@ fn setup_no_collision_team(
             entities: new_members.iter().map(|s| s.as_str()).collect(),
         },
     };
-    
+
     for mut client in &mut all_clients {
         client.write_packet(&add_packet);
     }
