@@ -109,6 +109,7 @@ struct ReplayNpc {
 #[derive(Component)]
 struct ReplayMode {
     original_seed: u64,
+    spawned_npc: Option<Entity>,
 }
 
 fn setup(
@@ -192,16 +193,19 @@ fn init_clients(
 
 fn reset_clients(
     mut clients: Query<(
+        Entity,
         &mut Client,
         &mut Position,
         &mut Look,
         &mut GameState,
         &mut ChunkLayer,
         &Username,
+        Option<&ReplayMode>,
     )>,
     mut globals: ResMut<Globals>,
+    mut commands: Commands,
 ) {
-    for (mut client, mut pos, mut look, mut state, mut layer, username) in &mut clients {
+    for (player_entity, mut client, mut pos, mut look, mut state, mut layer, username, replay_mode) in &mut clients {
         let out_of_bounds = (pos.0.y as i32) < START_POS.y - 32;
 
         if out_of_bounds || state.is_added() {
@@ -237,6 +241,16 @@ fn reset_clients(
                     );
                 }
             }
+            
+            // Despawn the NPC belonging to this player when they fall
+            if let Some(replay) = replay_mode {
+                if let Some(npc_entity) = replay.spawned_npc {
+                    commands.entity(npc_entity).insert(Despawned);
+                }
+            }
+            
+            // Remove ReplayMode component if it exists
+            commands.entity(player_entity).remove::<ReplayMode>();
 
             for pos in ChunkView::new(START_POS.into(), VIEW_DIST).iter() {
                 layer.insert_chunk(pos, UnloadedChunk::new());
@@ -295,12 +309,13 @@ fn manage_blocks(
         &mut GameState,
         &mut ChunkLayer,
         &Username,
+        Option<&ReplayMode>,
     )>,
     mut objectives: Query<&mut ObjectiveScores, With<Objective>>,
     globals: Res<Globals>,
     mut commands: Commands,
 ) {
-    for (entity, mut client, pos, mut state, mut layer, username) in &mut clients {
+    for (entity, mut client, pos, mut state, mut layer, username, existing_replay_mode) in &mut clients {
         let pos_under_player = BlockPos::new(
             (pos.0.x - 0.5).round() as i32,
             pos.0.y as i32 - 1,
@@ -314,6 +329,13 @@ fn manage_blocks(
             if block_type == BlockState::GOLD_BLOCK {
                 // Check if there's a global highscore
                 if let Some(highscore) = globals.highscore.clone() {
+                    // Remove any existing NPC for this player
+                    if let Some(replay_mode) = existing_replay_mode {
+                        if let Some(existing_npc) = replay_mode.spawned_npc {
+                            commands.entity(existing_npc).insert(Despawned);
+                        }
+                    }
+                    
                     // Store original seed and switch to highscore seed
                     let original_seed = state.seed;
                     state.seed = highscore.seed;
@@ -363,10 +385,13 @@ fn manage_blocks(
                             .as_millis(),
                     };
                     
-                    commands.spawn((entity_bundle, replay_component));
+                    let npc_entity = commands.spawn((entity_bundle, replay_component)).id();
                     
-                    // Add replay mode component to the player
-                    commands.entity(entity).insert(ReplayMode { original_seed });
+                    // Add replay mode component to the player with reference to the spawned NPC
+                    commands.entity(entity).insert(ReplayMode { 
+                        original_seed,
+                        spawned_npc: Some(npc_entity),
+                    });
                     
                     // Add player list entry so the player is visible
                     // Truncate username to fit 16 character limit
@@ -547,10 +572,11 @@ fn update_replay_npcs(
     mut npcs: Query<(Entity, &mut Position, &mut Look, &mut HeadYaw, &mut ReplayNpc)>,
     mut commands: Commands,
 ) {
+    // Since we only have one NPC at a time, we can use single() or iter().next()
     for (entity, mut pos, mut look, mut head_yaw, mut replay) in &mut npcs {
         // Check if movements vector is empty
         if replay.movements.is_empty() {
-            commands.entity(entity).despawn();
+            commands.entity(entity).insert(Despawned);
             continue;
         }
         
@@ -572,7 +598,7 @@ fn update_replay_npcs(
         
         if replay.current_index >= replay.movements.len() {
             // Replay finished, despawn the NPC
-            commands.entity(entity).despawn();
+            commands.entity(entity).insert(Despawned);
             continue;
         }
         
