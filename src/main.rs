@@ -12,6 +12,8 @@ use valence::entity::player::PlayerEntityBundle;
 use valence::player_list::{DisplayName, Listed, PlayerListEntryBundle};
 use valence::prelude::*;
 use valence::protocol::sound::{Sound, SoundCategory};
+use valence::protocol::packets::play::{TeamS2c, team_s2c::{CollisionRule, Mode, NameTagVisibility, TeamColor, TeamFlags}};
+use valence::protocol::WritePacket;
 use valence::scoreboard::*;
 use valence::spawn::IsFlat;
 use valence::title::SetTitle;
@@ -58,6 +60,7 @@ pub fn main() {
                 update_replay_npcs.after(record_player_movements),
                 despawn_disconnected_clients,
                 apply_custom_skin,
+                setup_no_collision_team,
             ),
         )
         .run();
@@ -110,6 +113,9 @@ struct ReplayMode {
     original_seed: u64,
     spawned_npc: Option<Entity>,
 }
+
+#[derive(Component)]
+struct NoCollisionTeam;
 
 fn setup(
     mut commands: Commands,
@@ -186,7 +192,7 @@ fn init_clients(
         let layer = ChunkLayer::new(ident!("the_end"), &dimensions, &biomes, &server);
         let entity_layer = EntityLayer::new(&server);
 
-        commands.entity(entity).insert((state, layer, entity_layer));
+        commands.entity(entity).insert((state, layer, entity_layer, NoCollisionTeam));
     }
 }
 
@@ -391,7 +397,7 @@ fn manage_blocks(
                             .as_millis(),
                     };
 
-                    let npc_entity = commands.spawn((entity_bundle, replay_component)).id();
+                    let npc_entity = commands.spawn((entity_bundle, replay_component, GameMode::Spectator, NoCollisionTeam)).id();
 
                     // Add replay mode component to the player with reference to the spawned NPC
                     commands.entity(entity).insert(ReplayMode {
@@ -654,5 +660,55 @@ fn apply_custom_skin(mut query: Query<&mut Properties, (Added<Properties>, Witho
             "ewogICJ0aW1lc3RhbXAiIDogMTY5MTcwNjU3MzE1NiwKICAicHJvZmlsZUlkIiA6ICJlODgyNzRlYjNmNTE0ZDYwYmMxYWQ5NTQ4MTIxODMwMyIsCiAgInByb2ZpbGVOYW1lIiA6ICJBbmltYWxUaGVHYW1lciIsCiAgInNpZ25hdHVyZVJlcXVpcmVkIiA6IHRydWUsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS8xZGUyYzgzZjhmNGZiMzgwNjlmNTVmNTJlNGY4ZWU1ZjA4NjcyMjllYWQ5MWI3ZTc5ZGVmNzU0YjcwZWE5NDMzIiwKICAgICAgIm1ldGFkYXRhIiA6IHsKICAgICAgICAibW9kZWwiIDogInNsaW0iCiAgICAgIH0KICAgIH0KICB9Cn0=",
             "k/g8JTYB0A5O+h8+XSdw3QFEVHnzomDsGl6eubV/sE396yAL7E4qCT24r3Uv88YYforuET1BXG0GBOewcij3uMajm+mc/P7v+0+C+NSS9g5dpSs2e9MdeGZBgDEr1kTnXzQmayZUvLGitW23GuRDHdVHx76JZpxBk3q0VsjgncNs6UVZwfYNCaUGZZx38bqG5FXGxE0MfFHKiJawKwWRaoAbHjrfsByLipIKUhssUF3pt+HPWbgaOD2rO0EOLBrGzvEnu9oeLPH4tqdlvurjGrdpM4wKCmS3j8K91OBTABciVR9xt0fRnhbL4JoZuLK+iefNXx8nBCVEOm9sNk4pXHNWZvKEkqMb3jvpxuYHsSZPm0IdN+74FEmjHy0sY/7+ZG/h/IUHs4CyrPAtR/rqON6MG8nVVBxUq4kWV+2Xj+U+O02gQUVFqMM77AqArRsPIkeFIgVQ6+WvBZYXuRe1Ryo6qwjmYGc4AeTZTtvafzv8vfAMFfJJmT69nkTTDO5hAtDTUnCd86nNFQ3qijdO9CW7OFDyysb9M0a1O7pQ7Nu10rkNwY+6uTfKoATtT80+RoMzvKwcIAG4cY+PR5jhsKP+sf+AEymovD+cPVnLOuZQ6bAyKW6yjf9Xd0vyirCgNaU1CGmDE1mihGK2kC0fm11RaoDbyKvMcLKAq+OFos0=",
         );
+    }
+}
+
+fn setup_no_collision_team(
+    new_team_members: Query<(&Username, Entity), Added<NoCollisionTeam>>,
+    mut all_clients: Query<&mut Client>,
+    mut team_created: Local<bool>,
+) {
+    let new_members: Vec<String> = new_team_members
+        .iter()
+        .map(|(username, _)| username.0.clone())
+        .collect();
+    
+    if new_members.is_empty() {
+        return;
+    }
+    
+    // Create team if it doesn't exist
+    if !*team_created {
+        let team_packet = TeamS2c {
+            team_name: "no_collision",
+            mode: Mode::CreateTeam {
+                team_display_name: "No Collision".into_text().into(),
+                friendly_flags: TeamFlags::default(),
+                name_tag_visibility: NameTagVisibility::Always,
+                collision_rule: CollisionRule::Never,
+                team_color: TeamColor::White,
+                team_prefix: Text::default().into(),
+                team_suffix: Text::default().into(),
+                entities: vec![],
+            },
+        };
+        
+        for mut client in &mut all_clients {
+            client.write_packet(&team_packet);
+        }
+        
+        *team_created = true;
+    }
+    
+    // Add new members to the team
+    let add_packet = TeamS2c {
+        team_name: "no_collision",
+        mode: Mode::AddEntities {
+            entities: new_members.iter().map(|s| s.as_str()).collect(),
+        },
+    };
+    
+    for mut client in &mut all_clients {
+        client.write_packet(&add_packet);
     }
 }
