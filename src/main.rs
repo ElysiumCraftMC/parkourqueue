@@ -89,6 +89,8 @@ struct HighScore {
     score: u32,
     seed: u64,
     movements: Vec<PlayerMovement>,
+    skin_textures: Option<String>,
+    skin_signature: Option<String>,
 }
 
 #[derive(Component)]
@@ -229,6 +231,7 @@ fn reset_clients(
         &mut ChunkLayer,
         &Username,
         Option<&ReplayMode>,
+        Option<&Properties>,
     )>,
     mut globals: ResMut<Globals>,
     mut commands: Commands,
@@ -242,6 +245,7 @@ fn reset_clients(
         mut layer,
         username,
         replay_mode,
+        properties,
     ) in &mut clients
     {
         let out_of_bounds = (pos.0.y as i32) < START_POS.y - 32;
@@ -266,11 +270,24 @@ fn reset_clients(
                 };
 
                 if is_new_highscore {
+                    // Get player's skin data if available
+                    let (skin_textures, skin_signature) = if let Some(props) = properties {
+                        if let Some(texture_prop) = props.textures() {
+                            (Some(texture_prop.value.clone()), texture_prop.signature.clone())
+                        } else {
+                            (None, None)
+                        }
+                    } else {
+                        (None, None)
+                    };
+                    
                     let highscore = HighScore {
                         username: username.to_string(),
                         score: state.score,
                         seed: state.seed,
                         movements: state.movements.clone(),
+                        skin_textures,
+                        skin_signature,
                     };
                     globals.highscore = Some(highscore);
                     client.send_chat_message(
@@ -439,12 +456,19 @@ fn manage_blocks(
                         owner_entity: entity,
                     };
 
+                    // Create Properties with the highscore player's skin
+                    let mut npc_properties = Properties::default();
+                    if let (Some(textures), Some(signature)) = (&highscore.skin_textures, &highscore.skin_signature) {
+                        npc_properties.set_skin(textures, signature);
+                    }
+                    
                     let npc_entity = commands
                         .spawn((
                             entity_bundle,
                             replay_component,
                             GameMode::Spectator,
                             NoCollisionTeam,
+                            npc_properties,
                         ))
                         .id();
 
