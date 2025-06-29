@@ -3,7 +3,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use valence::prelude::*;
 use valence::client::Properties;
@@ -54,6 +55,8 @@ pub fn main() {
                 reset_clients.after(init_clients),
                 manage_chunks.after(reset_clients).before(manage_blocks),
                 manage_blocks,
+                record_player_movements.after(manage_blocks),
+                update_replay_npcs.after(record_player_movements),
                 despawn_disconnected_clients,
                 apply_custom_skin,
             ),
@@ -64,6 +67,23 @@ pub fn main() {
 #[derive(Debug, Resource)]
 struct Globals {
     pub scoreboard_layer: Entity,
+    pub highscore: Option<HighScore>,
+}
+
+#[derive(Clone, Debug)]
+struct PlayerMovement {
+    position: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+    timestamp: u128,
+}
+
+#[derive(Clone, Debug)]
+struct HighScore {
+    username: String,
+    score: u32,
+    seed: u64,
+    movements: Vec<PlayerMovement>,
 }
 
 #[derive(Component)]
@@ -73,6 +93,22 @@ struct GameState {
     combo: u32,
     target_y: i32,
     last_block_timestamp: u128,
+    seed: u64,
+    movements: Vec<PlayerMovement>,
+    movement_start_time: u128,
+    rng: StdRng,
+}
+
+#[derive(Component)]
+struct ReplayNpc {
+    movements: Vec<PlayerMovement>,
+    current_index: usize,
+    start_time: u128,
+}
+
+#[derive(Component)]
+struct ReplayMode {
+    original_seed: u64,
 }
 
 fn setup(
@@ -92,6 +128,7 @@ fn setup(
 
     let globals = Globals {
         scoreboard_layer: parkour_objective_layer,
+        highscore: None,
     };
     commands.insert_resource(globals);
 }
@@ -129,12 +166,21 @@ fn init_clients(
         is_flat.0 = true;
         *game_mode = GameMode::Adventure;
 
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        
         let state = GameState {
             blocks: VecDeque::new(),
             score: 0,
             combo: 0,
             target_y: 0,
             last_block_timestamp: 0,
+            seed,
+            movements: Vec::new(),
+            movement_start_time: 0,
+            rng: StdRng::seed_from_u64(seed),
         };
 
         let layer = ChunkLayer::new(ident!("the_end"), &dimensions, &biomes, &server);
@@ -151,9 +197,11 @@ fn reset_clients(
         &mut Look,
         &mut GameState,
         &mut ChunkLayer,
+        &Username,
     )>,
+    mut globals: ResMut<Globals>,
 ) {
-    for (mut client, mut pos, mut look, mut state, mut layer) in &mut clients {
+    for (mut client, mut pos, mut look, mut state, mut layer, username) in &mut clients {
         let out_of_bounds = (pos.0.y as i32) < START_POS.y - 32;
 
         if out_of_bounds || state.is_added() {
@@ -167,6 +215,27 @@ fn reset_clients(
                             .bold()
                             .not_italic(),
                 );
+                
+                // Check if this is a new global highscore
+                let is_new_highscore = if let Some(ref existing_highscore) = globals.highscore {
+                    state.score > existing_highscore.score
+                } else {
+                    state.score > 0
+                };
+                
+                if is_new_highscore {
+                    let highscore = HighScore {
+                        username: username.to_string(),
+                        score: state.score,
+                        seed: state.seed,
+                        movements: state.movements.clone(),
+                    };
+                    globals.highscore = Some(highscore);
+                    client.send_chat_message(
+                        "NEW GLOBAL HIGHSCORE! ".color(Color::GOLD).bold()
+                            + format!("Score: {} - Your run has been saved!", state.score).color(Color::GREEN),
+                    );
+                }
             }
 
             for pos in ChunkView::new(START_POS.into(), VIEW_DIST).iter() {
@@ -175,6 +244,16 @@ fn reset_clients(
 
             state.score = 0;
             state.combo = 0;
+            state.seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            state.movements.clear();
+            state.movement_start_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            state.rng = StdRng::seed_from_u64(state.seed);
 
             for block in &state.blocks {
                 layer.set_block(*block, BlockState::AIR);
@@ -198,6 +277,12 @@ fn reset_clients(
             ]);
             look.yaw = 0.0;
             look.pitch = 0.0;
+            
+            if state.is_added() {
+                client.send_chat_message(
+                    format!("Parkour seed: {}", state.seed).color(Color::AQUA)
+                );
+            }
         }
     }
 }
@@ -212,6 +297,7 @@ fn manage_blocks(
         &Username,
     )>,
     mut objectives: Query<&mut ObjectiveScores, With<Objective>>,
+    globals: Res<Globals>,
     mut commands: Commands,
 ) {
     for (entity, mut client, pos, mut state, mut layer, username) in &mut clients {
@@ -226,42 +312,102 @@ fn manage_blocks(
         if pos_under_player == gold_block_pos {
             let block_type = layer.block(pos_under_player).unwrap_or_default().state;
             if block_type == BlockState::GOLD_BLOCK {
-                let player_pos = Position::new([
-                    pos_under_player.x as f64 + 0.5,
-                    pos_under_player.y as f64 + 1.0,
-                    pos_under_player.z as f64 + 0.5,
-                ]);
-                
-                let npc_id = UniqueId::default();
-                
-                // Spawn the player entity
-                commands.spawn(PlayerEntityBundle {
-                    layer: EntityLayerId(entity),
-                    uuid: npc_id,
-                    position: player_pos,
-                    look: Look::new(180.0, 0.0),
-                    head_yaw: HeadYaw(180.0),
-                    ..Default::default()
-                });
-                
-                // Add player list entry so the player is visible
-                commands.spawn(PlayerListEntryBundle {
-                    uuid: npc_id,
-                    username: Username("NPC".into()),
-                    display_name: DisplayName("NPC".color(Color::GOLD).into()),
-                    listed: Listed(false), // Don't show in player list
-                    ..Default::default()
-                });
-                
-                client.play_sound(
-                    Sound::EntityPlayerLevelup,
-                    SoundCategory::Master,
-                    pos.0,
-                    1.0,
-                    1.0,
-                );
-                
-                client.send_chat_message("An NPC player has spawned!");
+                // Check if there's a global highscore
+                if let Some(highscore) = globals.highscore.clone() {
+                    // Store original seed and switch to highscore seed
+                    let original_seed = state.seed;
+                    state.seed = highscore.seed;
+                    state.rng = StdRng::seed_from_u64(highscore.seed);
+                    
+                    // Clear and regenerate the parkour with the highscore seed
+                    for block in &state.blocks {
+                        layer.set_block(*block, BlockState::AIR);
+                    }
+                    state.blocks.clear();
+                    state.blocks.push_back(START_POS);
+                    layer.set_block(START_POS, BlockState::BLACK_WOOL);
+                    
+                    // Keep the gold block
+                    let gold_block_pos = BlockPos::new(START_POS.x + 2, START_POS.y, START_POS.z);
+                    layer.set_block(gold_block_pos, BlockState::GOLD_BLOCK);
+                    
+                    // Generate the same parkour as the highscore run
+                    for _ in 0..10 {
+                        generate_next_block(&mut state, &mut layer, false);
+                    }
+                    
+                    let player_pos = Position::new([
+                        START_POS.x as f64 + 0.5,
+                        START_POS.y as f64 + 1.0,
+                        START_POS.z as f64 + 0.5,
+                    ]);
+                    
+                    let npc_id = UniqueId::default();
+                    
+                    // Spawn the player entity with replay component
+                    let entity_bundle = PlayerEntityBundle {
+                        layer: EntityLayerId(entity),
+                        uuid: npc_id,
+                        position: player_pos,
+                        look: Look::new(0.0, 0.0),
+                        head_yaw: HeadYaw(0.0),
+                        ..Default::default()
+                    };
+                    
+                    let replay_component = ReplayNpc {
+                        movements: highscore.movements,
+                        current_index: 0,
+                        start_time: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis(),
+                    };
+                    
+                    commands.spawn((entity_bundle, replay_component));
+                    
+                    // Add replay mode component to the player
+                    commands.entity(entity).insert(ReplayMode { original_seed });
+                    
+                    // Add player list entry so the player is visible
+                    // Truncate username to fit 16 character limit
+                    let ghost_name = if highscore.username.len() > 10 {
+                        format!("{}..Ghost", &highscore.username[..7])
+                    } else {
+                        format!("{} Ghost", &highscore.username)
+                    };
+                    
+                    commands.spawn(PlayerListEntryBundle {
+                        uuid: npc_id,
+                        username: Username(ghost_name.chars().take(16).collect::<String>()),
+                        display_name: DisplayName(
+                            format!("{}'s Ghost ({})", highscore.username, highscore.score)
+                                .color(Color::GOLD)
+                                .into()
+                        ),
+                        listed: Listed(false), // Don't show in player list
+                        ..Default::default()
+                    });
+                    
+                    client.play_sound(
+                        Sound::EntityPlayerLevelup,
+                        SoundCategory::Master,
+                        pos.0,
+                        1.0,
+                        1.0,
+                    );
+                    
+                    client.send_chat_message(
+                        format!("Loading {}'s highscore run (Score: {}, Seed: {})!", 
+                            highscore.username, 
+                            highscore.score,
+                            highscore.seed
+                        ).color(Color::GOLD)
+                    );
+                } else {
+                    client.send_chat_message(
+                        "No global highscore recorded yet!".color(Color::RED)
+                    );
+                }
             }
         }
 
@@ -341,7 +487,7 @@ fn generate_next_block(state: &mut GameState, layer: &mut ChunkLayer, in_game: b
     }
 
     let last_pos = *state.blocks.back().unwrap();
-    let block_pos = generate_random_block(last_pos, state.target_y);
+    let block_pos = generate_random_block(last_pos, state.target_y, &mut state.rng);
 
     if last_pos.y == START_POS.y {
         state.target_y = 0
@@ -349,9 +495,7 @@ fn generate_next_block(state: &mut GameState, layer: &mut ChunkLayer, in_game: b
         state.target_y = START_POS.y;
     }
 
-    let mut rng = rand::thread_rng();
-
-    layer.set_block(block_pos, *BLOCK_TYPES.choose(&mut rng).unwrap());
+    layer.set_block(block_pos, *BLOCK_TYPES.choose(&mut state.rng).unwrap());
     state.blocks.push_back(block_pos);
 
     state.last_block_timestamp = SystemTime::now()
@@ -360,8 +504,7 @@ fn generate_next_block(state: &mut GameState, layer: &mut ChunkLayer, in_game: b
         .as_millis();
 }
 
-fn generate_random_block(pos: BlockPos, target_y: i32) -> BlockPos {
-    let mut rng = rand::thread_rng();
+fn generate_random_block(pos: BlockPos, target_y: i32, rng: &mut StdRng) -> BlockPos {
 
     let y = match target_y {
         0 => rng.gen_range(-1..2),
@@ -376,6 +519,96 @@ fn generate_random_block(pos: BlockPos, target_y: i32) -> BlockPos {
     let x = rng.gen_range(-3..4);
 
     BlockPos::new(pos.x + x, pos.y + y, pos.z + z)
+}
+
+fn record_player_movements(
+    mut clients: Query<(&Position, &Look, &mut GameState), With<Client>>,
+) {
+    for (pos, look, mut state) in &mut clients {
+        if state.score > 0 {
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            
+            let movement = PlayerMovement {
+                position: [pos.0.x, pos.0.y, pos.0.z],
+                yaw: look.yaw,
+                pitch: look.pitch,
+                timestamp: current_time - state.movement_start_time,
+            };
+            
+            state.movements.push(movement);
+        }
+    }
+}
+
+fn update_replay_npcs(
+    mut npcs: Query<(Entity, &mut Position, &mut Look, &mut HeadYaw, &mut ReplayNpc)>,
+    mut commands: Commands,
+) {
+    for (entity, mut pos, mut look, mut head_yaw, mut replay) in &mut npcs {
+        // Check if movements vector is empty
+        if replay.movements.is_empty() {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        
+        let elapsed = current_time.saturating_sub(replay.start_time);
+        
+        // Find the appropriate movement frame
+        while replay.current_index < replay.movements.len().saturating_sub(1) {
+            if replay.movements[replay.current_index + 1].timestamp <= elapsed {
+                replay.current_index += 1;
+            } else {
+                break;
+            }
+        }
+        
+        if replay.current_index >= replay.movements.len() {
+            // Replay finished, despawn the NPC
+            commands.entity(entity).despawn();
+            continue;
+        }
+        
+        // Interpolate between movements for smooth playback
+        let current_movement = &replay.movements[replay.current_index];
+        
+        if replay.current_index < replay.movements.len() - 1 {
+            let next_movement = &replay.movements[replay.current_index + 1];
+            let time_diff = next_movement.timestamp - current_movement.timestamp;
+            let time_since_current = elapsed.saturating_sub(current_movement.timestamp);
+            let t = if time_diff > 0 {
+                (time_since_current as f64) / (time_diff as f64)
+            } else {
+                1.0
+            };
+            let t = t.clamp(0.0, 1.0);
+            
+            // Interpolate position
+            pos.0.x = current_movement.position[0] + (next_movement.position[0] - current_movement.position[0]) * t;
+            pos.0.y = current_movement.position[1] + (next_movement.position[1] - current_movement.position[1]) * t;
+            pos.0.z = current_movement.position[2] + (next_movement.position[2] - current_movement.position[2]) * t;
+            
+            // Interpolate rotation
+            look.yaw = current_movement.yaw + (next_movement.yaw - current_movement.yaw) * t as f32;
+            look.pitch = current_movement.pitch + (next_movement.pitch - current_movement.pitch) * t as f32;
+            head_yaw.0 = look.yaw;
+        } else {
+            // Use the last movement
+            pos.0.x = current_movement.position[0];
+            pos.0.y = current_movement.position[1];
+            pos.0.z = current_movement.position[2];
+            look.yaw = current_movement.yaw;
+            look.pitch = current_movement.pitch;
+            head_yaw.0 = look.yaw;
+        }
+    }
 }
 
 fn apply_custom_skin(mut query: Query<&mut Properties, (Added<Properties>, Without<Client>)>) {
