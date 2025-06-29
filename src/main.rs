@@ -202,6 +202,20 @@ fn init_clients(
         commands
             .entity(entity)
             .insert((state, layer, entity_layer, NoCollisionTeam));
+            
+        // Send welcome message
+        client.send_chat_message(
+            "Welcome to Parkour Queue!".color(Color::GOLD).bold()
+        );
+        client.send_chat_message(
+            "Jump on the ".color(Color::WHITE) + "GOLD BLOCK".color(Color::GOLD).bold() + " to race against the champion!".color(Color::WHITE)
+        );
+        client.send_chat_message(
+            "The champion's ghost will appear and replay their best run.".italic().color(Color::GRAY)
+        );
+        client.send_chat_message(
+            "Beat their score to become the new champion!".color(Color::GREEN)
+        );
     }
 }
 
