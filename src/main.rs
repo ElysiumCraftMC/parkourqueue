@@ -6,11 +6,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::Rng;
 use rand::seq::SliceRandom;
 use valence::prelude::*;
+use valence::client::Properties;
 use valence::protocol::sound::{Sound, SoundCategory};
 use valence::scoreboard::*;
 use valence::spawn::IsFlat;
 use valence::title::SetTitle;
 use valence::{CompressionThreshold, ServerSettings};
+use valence::entity::player::PlayerEntityBundle;
+use valence::player_list::{DisplayName, Listed, PlayerListEntryBundle};
+use valence::entity::HeadYaw;
 
 const START_POS: BlockPos = BlockPos::new(0, 100, 0);
 const VIEW_DIST: u8 = 10;
@@ -18,9 +22,16 @@ const VIEW_DIST: u8 = 10;
 const BLOCK_TYPES: [BlockState; 1] = [BlockState::OBSIDIAN];
 
 pub fn main() {
-    let velocity_secret = std::env::var("VELOCITY_SECRET").expect("Expected VELOCITY_SECRET env");
-    let secret_arc = Arc::from(velocity_secret);
-    let address = std::env::var("ADDRESS").expect("Expected ADDRESS env");
+    let connection_mode = match std::env::var("VELOCITY_SECRET") {
+        Ok(velocity_secret) => {
+            let secret_arc = Arc::from(velocity_secret);
+            ConnectionMode::Velocity { secret: secret_arc }
+        }
+        Err(_) => ConnectionMode::Offline,
+    };
+    
+    let address = std::env::var("ADDRESS")
+        .unwrap_or_else(|_| "0.0.0.0:25565".to_string());
     let address: SocketAddr = address.parse().expect("Failed to parse ADDRESS");
 
     App::new()
@@ -29,7 +40,7 @@ pub fn main() {
             ..Default::default()
         })
         .insert_resource(NetworkSettings {
-            connection_mode: ConnectionMode::Velocity { secret: secret_arc },
+            connection_mode,
             max_players: i32::MAX as usize,
             address,
             ..Default::default()
@@ -44,6 +55,7 @@ pub fn main() {
                 manage_chunks.after(reset_clients).before(manage_blocks),
                 manage_blocks,
                 despawn_disconnected_clients,
+                apply_custom_skin,
             ),
         )
         .run();
@@ -126,8 +138,9 @@ fn init_clients(
         };
 
         let layer = ChunkLayer::new(ident!("the_end"), &dimensions, &biomes, &server);
+        let entity_layer = EntityLayer::new(&server);
 
-        commands.entity(entity).insert((state, layer));
+        commands.entity(entity).insert((state, layer, entity_layer));
     }
 }
 
@@ -169,6 +182,10 @@ fn reset_clients(
             state.blocks.clear();
             state.blocks.push_back(START_POS);
             layer.set_block(START_POS, BlockState::BLACK_WOOL);
+            
+            // Add gold block for pig spawning
+            let gold_block_pos = BlockPos::new(START_POS.x + 2, START_POS.y, START_POS.z);
+            layer.set_block(gold_block_pos, BlockState::GOLD_BLOCK);
 
             for _ in 0..10 {
                 generate_next_block(&mut state, &mut layer, false);
@@ -187,6 +204,7 @@ fn reset_clients(
 
 fn manage_blocks(
     mut clients: Query<(
+        Entity,
         &mut Client,
         &Position,
         &mut GameState,
@@ -194,14 +212,60 @@ fn manage_blocks(
         &Username,
     )>,
     mut objectives: Query<&mut ObjectiveScores, With<Objective>>,
+    mut commands: Commands,
 ) {
-    for (mut client, pos, mut state, mut layer, username) in &mut clients {
+    for (entity, mut client, pos, mut state, mut layer, username) in &mut clients {
         let pos_under_player = BlockPos::new(
             (pos.0.x - 0.5).round() as i32,
             pos.0.y as i32 - 1,
             (pos.0.z - 0.5).round() as i32,
         );
 
+        // Check if player is on the gold block (player spawner)
+        let gold_block_pos = BlockPos::new(START_POS.x + 2, START_POS.y, START_POS.z);
+        if pos_under_player == gold_block_pos {
+            let block_type = layer.block(pos_under_player).unwrap_or_default().state;
+            if block_type == BlockState::GOLD_BLOCK {
+                let player_pos = Position::new([
+                    pos_under_player.x as f64 + 0.5,
+                    pos_under_player.y as f64 + 1.0,
+                    pos_under_player.z as f64 + 0.5,
+                ]);
+                
+                let npc_id = UniqueId::default();
+                
+                // Spawn the player entity
+                commands.spawn(PlayerEntityBundle {
+                    layer: EntityLayerId(entity),
+                    uuid: npc_id,
+                    position: player_pos,
+                    look: Look::new(180.0, 0.0),
+                    head_yaw: HeadYaw(180.0),
+                    ..Default::default()
+                });
+                
+                // Add player list entry so the player is visible
+                commands.spawn(PlayerListEntryBundle {
+                    uuid: npc_id,
+                    username: Username("NPC".into()),
+                    display_name: DisplayName("NPC".color(Color::GOLD).into()),
+                    listed: Listed(false), // Don't show in player list
+                    ..Default::default()
+                });
+                
+                client.play_sound(
+                    Sound::EntityPlayerLevelup,
+                    SoundCategory::Master,
+                    pos.0,
+                    1.0,
+                    1.0,
+                );
+                
+                client.send_chat_message("An NPC player has spawned!");
+            }
+        }
+
+        // Regular parkour logic
         if let Some(index) = state
             .blocks
             .iter()
@@ -312,4 +376,13 @@ fn generate_random_block(pos: BlockPos, target_y: i32) -> BlockPos {
     let x = rng.gen_range(-3..4);
 
     BlockPos::new(pos.x + x, pos.y + y, pos.z + z)
+}
+
+fn apply_custom_skin(mut query: Query<&mut Properties, (Added<Properties>, Without<Client>)>) {
+    for mut props in &mut query {
+        props.set_skin(
+            "ewogICJ0aW1lc3RhbXAiIDogMTY5MTcwNjU3MzE1NiwKICAicHJvZmlsZUlkIiA6ICJlODgyNzRlYjNmNTE0ZDYwYmMxYWQ5NTQ4MTIxODMwMyIsCiAgInByb2ZpbGVOYW1lIiA6ICJBbmltYWxUaGVHYW1lciIsCiAgInNpZ25hdHVyZVJlcXVpcmVkIiA6IHRydWUsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS8xZGUyYzgzZjhmNGZiMzgwNjlmNTVmNTJlNGY4ZWU1ZjA4NjcyMjllYWQ5MWI3ZTc5ZGVmNzU0YjcwZWE5NDMzIiwKICAgICAgIm1ldGFkYXRhIiA6IHsKICAgICAgICAibW9kZWwiIDogInNsaW0iCiAgICAgIH0KICAgIH0KICB9Cn0=",
+            "k/g8JTYB0A5O+h8+XSdw3QFEVHnzomDsGl6eubV/sE396yAL7E4qCT24r3Uv88YYforuET1BXG0GBOewcij3uMajm+mc/P7v+0+C+NSS9g5dpSs2e9MdeGZBgDEr1kTnXzQmayZUvLGitW23GuRDHdVHx76JZpxBk3q0VsjgncNs6UVZwfYNCaUGZZx38bqG5FXGxE0MfFHKiJawKwWRaoAbHjrfsByLipIKUhssUF3pt+HPWbgaOD2rO0EOLBrGzvEnu9oeLPH4tqdlvurjGrdpM4wKCmS3j8K91OBTABciVR9xt0fRnhbL4JoZuLK+iefNXx8nBCVEOm9sNk4pXHNWZvKEkqMb3jvpxuYHsSZPm0IdN+74FEmjHy0sY/7+ZG/h/IUHs4CyrPAtR/rqON6MG8nVVBxUq4kWV+2Xj+U+O02gQUVFqMM77AqArRsPIkeFIgVQ6+WvBZYXuRe1Ryo6qwjmYGc4AeTZTtvafzv8vfAMFfJJmT69nkTTDO5hAtDTUnCd86nNFQ3qijdO9CW7OFDyysb9M0a1O7pQ7Nu10rkNwY+6uTfKoATtT80+RoMzvKwcIAG4cY+PR5jhsKP+sf+AEymovD+cPVnLOuZQ6bAyKW6yjf9Xd0vyirCgNaU1CGmDE1mihGK2kC0fm11RaoDbyKvMcLKAq+OFos0=",
+        );
+    }
 }
