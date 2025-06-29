@@ -102,6 +102,7 @@ struct GameState {
     movements: Vec<PlayerMovement>,
     movement_start_time: u128,
     rng: StdRng,
+    recording_started: bool,
 }
 
 #[derive(Component)]
@@ -190,6 +191,7 @@ fn init_clients(
             movements: Vec::new(),
             movement_start_time: 0,
             rng: StdRng::seed_from_u64(seed),
+            recording_started: false,
         };
 
         let layer = ChunkLayer::new(ident!("the_end"), &dimensions, &biomes, &server);
@@ -289,6 +291,7 @@ fn reset_clients(
                 .unwrap()
                 .as_millis();
             state.rng = StdRng::seed_from_u64(state.seed);
+            state.recording_started = false;
 
             for block in &state.blocks {
                 layer.set_block(*block, BlockState::AIR);
@@ -466,6 +469,14 @@ fn manage_blocks(
             .position(|block| *block == pos_under_player)
         {
             if index > 0 {
+                // Start recording when jumping from the first block (index 1, since index 0 is spawn)
+                if !state.recording_started && index == 1 {
+                    state.recording_started = true;
+                    state.movement_start_time = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis();
+                }
                 let power_result = 2_f32.powf((state.combo as f32) / 45.0);
                 let max_time_taken = (1000_f32 * (index as f32) / power_result) as u128;
 
@@ -570,7 +581,7 @@ fn generate_random_block(pos: BlockPos, target_y: i32, rng: &mut StdRng) -> Bloc
 
 fn record_player_movements(mut clients: Query<(&Position, &Look, &mut GameState), With<Client>>) {
     for (pos, look, mut state) in &mut clients {
-        if state.score > 0 {
+        if state.recording_started {
             let current_time = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
