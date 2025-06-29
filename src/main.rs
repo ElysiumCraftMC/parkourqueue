@@ -3,19 +3,19 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use valence::prelude::*;
+use rand::{Rng, SeedableRng};
 use valence::client::Properties;
+use valence::entity::HeadYaw;
+use valence::entity::player::PlayerEntityBundle;
+use valence::player_list::{DisplayName, Listed, PlayerListEntryBundle};
+use valence::prelude::*;
 use valence::protocol::sound::{Sound, SoundCategory};
 use valence::scoreboard::*;
 use valence::spawn::IsFlat;
 use valence::title::SetTitle;
 use valence::{CompressionThreshold, ServerSettings};
-use valence::entity::player::PlayerEntityBundle;
-use valence::player_list::{DisplayName, Listed, PlayerListEntryBundle};
-use valence::entity::HeadYaw;
 
 const START_POS: BlockPos = BlockPos::new(0, 100, 0);
 const VIEW_DIST: u8 = 10;
@@ -30,9 +30,8 @@ pub fn main() {
         }
         Err(_) => ConnectionMode::Offline,
     };
-    
-    let address = std::env::var("ADDRESS")
-        .unwrap_or_else(|_| "0.0.0.0:25565".to_string());
+
+    let address = std::env::var("ADDRESS").unwrap_or_else(|_| "0.0.0.0:25565".to_string());
     let address: SocketAddr = address.parse().expect("Failed to parse ADDRESS");
 
     App::new()
@@ -171,7 +170,7 @@ fn init_clients(
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         let state = GameState {
             blocks: VecDeque::new(),
             score: 0,
@@ -205,7 +204,17 @@ fn reset_clients(
     mut globals: ResMut<Globals>,
     mut commands: Commands,
 ) {
-    for (player_entity, mut client, mut pos, mut look, mut state, mut layer, username, replay_mode) in &mut clients {
+    for (
+        player_entity,
+        mut client,
+        mut pos,
+        mut look,
+        mut state,
+        mut layer,
+        username,
+        replay_mode,
+    ) in &mut clients
+    {
         let out_of_bounds = (pos.0.y as i32) < START_POS.y - 32;
 
         if out_of_bounds || state.is_added() {
@@ -219,14 +228,14 @@ fn reset_clients(
                             .bold()
                             .not_italic(),
                 );
-                
+
                 // Check if this is a new global highscore
                 let is_new_highscore = if let Some(ref existing_highscore) = globals.highscore {
                     state.score > existing_highscore.score
                 } else {
                     state.score > 0
                 };
-                
+
                 if is_new_highscore {
                     let highscore = HighScore {
                         username: username.to_string(),
@@ -237,18 +246,19 @@ fn reset_clients(
                     globals.highscore = Some(highscore);
                     client.send_chat_message(
                         "NEW GLOBAL HIGHSCORE! ".color(Color::GOLD).bold()
-                            + format!("Score: {} - Your run has been saved!", state.score).color(Color::GREEN),
+                            + format!("Score: {} - Your run has been saved!", state.score)
+                                .color(Color::GREEN),
                     );
                 }
             }
-            
+
             // Despawn the NPC belonging to this player when they fall
             if let Some(replay) = replay_mode {
                 if let Some(npc_entity) = replay.spawned_npc {
                     commands.entity(npc_entity).insert(Despawned);
                 }
             }
-            
+
             // Remove ReplayMode component if it exists
             commands.entity(player_entity).remove::<ReplayMode>();
 
@@ -275,7 +285,7 @@ fn reset_clients(
             state.blocks.clear();
             state.blocks.push_back(START_POS);
             layer.set_block(START_POS, BlockState::BLACK_WOOL);
-            
+
             // Add gold block for pig spawning
             let gold_block_pos = BlockPos::new(START_POS.x + 2, START_POS.y, START_POS.z);
             layer.set_block(gold_block_pos, BlockState::GOLD_BLOCK);
@@ -291,12 +301,6 @@ fn reset_clients(
             ]);
             look.yaw = 0.0;
             look.pitch = 0.0;
-            
-            if state.is_added() {
-                client.send_chat_message(
-                    format!("Parkour seed: {}", state.seed).color(Color::AQUA)
-                );
-            }
         }
     }
 }
@@ -315,7 +319,9 @@ fn manage_blocks(
     globals: Res<Globals>,
     mut commands: Commands,
 ) {
-    for (entity, mut client, pos, mut state, mut layer, username, existing_replay_mode) in &mut clients {
+    for (entity, mut client, pos, mut state, mut layer, username, existing_replay_mode) in
+        &mut clients
+    {
         let pos_under_player = BlockPos::new(
             (pos.0.x - 0.5).round() as i32,
             pos.0.y as i32 - 1,
@@ -335,12 +341,12 @@ fn manage_blocks(
                             commands.entity(existing_npc).insert(Despawned);
                         }
                     }
-                    
+
                     // Store original seed and switch to highscore seed
                     let original_seed = state.seed;
                     state.seed = highscore.seed;
                     state.rng = StdRng::seed_from_u64(highscore.seed);
-                    
+
                     // Clear and regenerate the parkour with the highscore seed
                     for block in &state.blocks {
                         layer.set_block(*block, BlockState::AIR);
@@ -348,24 +354,24 @@ fn manage_blocks(
                     state.blocks.clear();
                     state.blocks.push_back(START_POS);
                     layer.set_block(START_POS, BlockState::BLACK_WOOL);
-                    
+
                     // Keep the gold block
                     let gold_block_pos = BlockPos::new(START_POS.x + 2, START_POS.y, START_POS.z);
                     layer.set_block(gold_block_pos, BlockState::GOLD_BLOCK);
-                    
+
                     // Generate the same parkour as the highscore run
                     for _ in 0..10 {
                         generate_next_block(&mut state, &mut layer, false);
                     }
-                    
+
                     let player_pos = Position::new([
                         START_POS.x as f64 + 0.5,
                         START_POS.y as f64 + 1.0,
                         START_POS.z as f64 + 0.5,
                     ]);
-                    
+
                     let npc_id = UniqueId::default();
-                    
+
                     // Spawn the player entity with replay component
                     let entity_bundle = PlayerEntityBundle {
                         layer: EntityLayerId(entity),
@@ -375,7 +381,7 @@ fn manage_blocks(
                         head_yaw: HeadYaw(0.0),
                         ..Default::default()
                     };
-                    
+
                     let replay_component = ReplayNpc {
                         movements: highscore.movements,
                         current_index: 0,
@@ -384,15 +390,15 @@ fn manage_blocks(
                             .unwrap()
                             .as_millis(),
                     };
-                    
+
                     let npc_entity = commands.spawn((entity_bundle, replay_component)).id();
-                    
+
                     // Add replay mode component to the player with reference to the spawned NPC
-                    commands.entity(entity).insert(ReplayMode { 
+                    commands.entity(entity).insert(ReplayMode {
                         original_seed,
                         spawned_npc: Some(npc_entity),
                     });
-                    
+
                     // Add player list entry so the player is visible
                     // Truncate username to fit 16 character limit
                     let ghost_name = if highscore.username.len() > 10 {
@@ -400,19 +406,19 @@ fn manage_blocks(
                     } else {
                         format!("{} Ghost", &highscore.username)
                     };
-                    
+
                     commands.spawn(PlayerListEntryBundle {
                         uuid: npc_id,
                         username: Username(ghost_name.chars().take(16).collect::<String>()),
                         display_name: DisplayName(
                             format!("{}'s Ghost ({})", highscore.username, highscore.score)
                                 .color(Color::GOLD)
-                                .into()
+                                .into(),
                         ),
                         listed: Listed(false), // Don't show in player list
                         ..Default::default()
                     });
-                    
+
                     client.play_sound(
                         Sound::EntityPlayerLevelup,
                         SoundCategory::Master,
@@ -420,18 +426,16 @@ fn manage_blocks(
                         1.0,
                         1.0,
                     );
-                    
+
                     client.send_chat_message(
-                        format!("Loading {}'s highscore run (Score: {}, Seed: {})!", 
-                            highscore.username, 
-                            highscore.score,
-                            highscore.seed
-                        ).color(Color::GOLD)
+                        format!(
+                            "Loading {}'s highscore run (Score: {})!",
+                            highscore.username, highscore.score
+                        )
+                        .color(Color::GOLD),
                     );
                 } else {
-                    client.send_chat_message(
-                        "No global highscore recorded yet!".color(Color::RED)
-                    );
+                    client.send_chat_message("No global highscore recorded yet!".color(Color::RED));
                 }
             }
         }
@@ -530,7 +534,6 @@ fn generate_next_block(state: &mut GameState, layer: &mut ChunkLayer, in_game: b
 }
 
 fn generate_random_block(pos: BlockPos, target_y: i32, rng: &mut StdRng) -> BlockPos {
-
     let y = match target_y {
         0 => rng.gen_range(-1..2),
         y if y > pos.y => 1,
@@ -546,30 +549,34 @@ fn generate_random_block(pos: BlockPos, target_y: i32, rng: &mut StdRng) -> Bloc
     BlockPos::new(pos.x + x, pos.y + y, pos.z + z)
 }
 
-fn record_player_movements(
-    mut clients: Query<(&Position, &Look, &mut GameState), With<Client>>,
-) {
+fn record_player_movements(mut clients: Query<(&Position, &Look, &mut GameState), With<Client>>) {
     for (pos, look, mut state) in &mut clients {
         if state.score > 0 {
             let current_time = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis();
-            
+
             let movement = PlayerMovement {
                 position: [pos.0.x, pos.0.y, pos.0.z],
                 yaw: look.yaw,
                 pitch: look.pitch,
                 timestamp: current_time - state.movement_start_time,
             };
-            
+
             state.movements.push(movement);
         }
     }
 }
 
 fn update_replay_npcs(
-    mut npcs: Query<(Entity, &mut Position, &mut Look, &mut HeadYaw, &mut ReplayNpc)>,
+    mut npcs: Query<(
+        Entity,
+        &mut Position,
+        &mut Look,
+        &mut HeadYaw,
+        &mut ReplayNpc,
+    )>,
     mut commands: Commands,
 ) {
     // Since we only have one NPC at a time, we can use single() or iter().next()
@@ -579,14 +586,14 @@ fn update_replay_npcs(
             commands.entity(entity).insert(Despawned);
             continue;
         }
-        
+
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        
+
         let elapsed = current_time.saturating_sub(replay.start_time);
-        
+
         // Find the appropriate movement frame
         while replay.current_index < replay.movements.len().saturating_sub(1) {
             if replay.movements[replay.current_index + 1].timestamp <= elapsed {
@@ -595,16 +602,16 @@ fn update_replay_npcs(
                 break;
             }
         }
-        
+
         if replay.current_index >= replay.movements.len() {
             // Replay finished, despawn the NPC
             commands.entity(entity).insert(Despawned);
             continue;
         }
-        
+
         // Interpolate between movements for smooth playback
         let current_movement = &replay.movements[replay.current_index];
-        
+
         if replay.current_index < replay.movements.len() - 1 {
             let next_movement = &replay.movements[replay.current_index + 1];
             let time_diff = next_movement.timestamp - current_movement.timestamp;
@@ -615,15 +622,19 @@ fn update_replay_npcs(
                 1.0
             };
             let t = t.clamp(0.0, 1.0);
-            
+
             // Interpolate position
-            pos.0.x = current_movement.position[0] + (next_movement.position[0] - current_movement.position[0]) * t;
-            pos.0.y = current_movement.position[1] + (next_movement.position[1] - current_movement.position[1]) * t;
-            pos.0.z = current_movement.position[2] + (next_movement.position[2] - current_movement.position[2]) * t;
-            
+            pos.0.x = current_movement.position[0]
+                + (next_movement.position[0] - current_movement.position[0]) * t;
+            pos.0.y = current_movement.position[1]
+                + (next_movement.position[1] - current_movement.position[1]) * t;
+            pos.0.z = current_movement.position[2]
+                + (next_movement.position[2] - current_movement.position[2]) * t;
+
             // Interpolate rotation
             look.yaw = current_movement.yaw + (next_movement.yaw - current_movement.yaw) * t as f32;
-            look.pitch = current_movement.pitch + (next_movement.pitch - current_movement.pitch) * t as f32;
+            look.pitch =
+                current_movement.pitch + (next_movement.pitch - current_movement.pitch) * t as f32;
             head_yaw.0 = look.yaw;
         } else {
             // Use the last movement
