@@ -110,6 +110,8 @@ struct ReplayNpc {
     movements: Vec<PlayerMovement>,
     current_index: usize,
     start_time: u128,
+    replay_started: bool,
+    owner_entity: Entity,
 }
 
 #[derive(Component)]
@@ -323,7 +325,7 @@ fn manage_blocks(
     mut clients: Query<(
         Entity,
         &mut Client,
-        &Position,
+        &mut Position,
         &mut GameState,
         &mut ChunkLayer,
         &Username,
@@ -333,7 +335,7 @@ fn manage_blocks(
     globals: Res<Globals>,
     mut commands: Commands,
 ) {
-    for (entity, mut client, pos, mut state, mut layer, username, existing_replay_mode) in
+    for (entity, mut client, mut pos, mut state, mut layer, username, existing_replay_mode) in
         &mut clients
     {
         let pos_under_player = BlockPos::new(
@@ -379,11 +381,26 @@ fn manage_blocks(
                         generate_next_block(&mut state, &mut layer, false);
                     }
 
-                    let player_pos = Position::new([
-                        START_POS.x as f64 + 0.5,
-                        START_POS.y as f64 + 1.0,
-                        START_POS.z as f64 + 0.5,
-                    ]);
+                    // Get the first recorded position from the highscore movements
+                    let (npc_pos, npc_yaw, npc_pitch) =
+                        if let Some(first_movement) = highscore.movements.first() {
+                            (
+                                Position::new(first_movement.position),
+                                first_movement.yaw,
+                                first_movement.pitch,
+                            )
+                        } else {
+                            // Fallback to spawn position if no movements recorded
+                            (
+                                Position::new([
+                                    START_POS.x as f64 + 0.5,
+                                    START_POS.y as f64 + 1.0,
+                                    START_POS.z as f64 + 0.5,
+                                ]),
+                                0.0,
+                                0.0,
+                            )
+                        };
 
                     let npc_id = UniqueId::default();
 
@@ -391,9 +408,9 @@ fn manage_blocks(
                     let entity_bundle = PlayerEntityBundle {
                         layer: EntityLayerId(entity),
                         uuid: npc_id,
-                        position: player_pos,
-                        look: Look::new(0.0, 0.0),
-                        head_yaw: HeadYaw(0.0),
+                        position: npc_pos,
+                        look: Look::new(npc_yaw, npc_pitch),
+                        head_yaw: HeadYaw(npc_yaw),
                         ..Default::default()
                     };
 
@@ -404,6 +421,8 @@ fn manage_blocks(
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
                             .as_millis(),
+                        replay_started: false,
+                        owner_entity: entity,
                     };
 
                     let npc_entity = commands
@@ -424,7 +443,7 @@ fn manage_blocks(
                     // Add player list entry so the player is visible
                     // Truncate username to fit 16 character limit
                     let ghost_name = if highscore.username.len() > 10 {
-                        format!("{}..Ghost", &highscore.username[..7])
+                        format!("{}. Ghost", &highscore.username[..7])
                     } else {
                         format!("{} Ghost", &highscore.username)
                     };
@@ -456,6 +475,13 @@ fn manage_blocks(
                         )
                         .color(Color::GOLD),
                     );
+                    
+                    // Teleport player back to spawn
+                    pos.set([
+                        START_POS.x as f64 + 0.5,
+                        START_POS.y as f64 + 1.0,
+                        START_POS.z as f64 + 0.5,
+                    ]);
                 } else {
                     client.send_chat_message("No global highscore recorded yet!".color(Color::RED));
                 }
@@ -607,10 +633,27 @@ fn update_replay_npcs(
         &mut HeadYaw,
         &mut ReplayNpc,
     )>,
+    clients: Query<&GameState>,
     mut commands: Commands,
 ) {
     // Since we only have one NPC at a time, we can use single() or iter().next()
     for (entity, mut pos, mut look, mut head_yaw, mut replay) in &mut npcs {
+        // Check if the owner player has started playing (score >= 1)
+        if let Ok(owner_state) = clients.get(replay.owner_entity) {
+            if owner_state.score > 0 && !replay.replay_started {
+                // Player just started, begin the replay
+                replay.replay_started = true;
+                replay.start_time = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+            }
+        }
+
+        // If replay hasn't started yet, keep NPC at first position
+        if !replay.replay_started {
+            continue;
+        }
         // Check if movements vector is empty
         if replay.movements.is_empty() {
             commands.entity(entity).insert(Despawned);
