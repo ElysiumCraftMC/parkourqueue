@@ -1,7 +1,10 @@
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::fs;
+use std::path::Path;
+use serde::{Serialize, Deserialize};
 
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -76,7 +79,13 @@ struct Globals {
     pub highscore: Option<HighScore>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Resource, Default)]
+struct ScoreTracker {
+    pub scores: std::collections::HashMap<String, i32>,
+    pub last_saved_top_15: Vec<(String, i32)>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct PlayerMovement {
     position: [f64; 3],
     yaw: f32,
@@ -84,12 +93,18 @@ struct PlayerMovement {
     timestamp: u128,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct HighScore {
     username: String,
     score: u32,
     seed: u64,
     movements: Vec<PlayerMovement>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SaveData {
+    highscore: Option<HighScore>,
+    scoreboard: Vec<(String, i32)>,
 }
 
 #[derive(Component)]
@@ -131,19 +146,49 @@ fn setup(
     biomes: Res<BiomeRegistry>,
 ) {
     let parkour_objective_layer = commands.spawn(EntityLayer::new(&server)).id();
-    let parkour_objective = ObjectiveBundle {
+    let mut parkour_objective = ObjectiveBundle {
         name: Objective::new("parkour-jumps"),
         display: ObjectiveDisplay("Best scores".into_text()),
         layer: EntityLayerId(parkour_objective_layer),
         ..Default::default()
     };
+    
+    // Load game data from file
+    let (highscore, scoreboard) = match load_game_data() {
+        Ok(save_data) => {
+            if let Some(ref h) = save_data.highscore {
+                println!("Loaded highscore: {} by {}", h.score, h.username);
+            }
+            println!("Loaded {} scoreboard entries", save_data.scoreboard.len());
+            
+            // Populate the objective scores
+            for (name, score) in &save_data.scoreboard {
+                parkour_objective.scores.insert(name.clone(), *score);
+            }
+            
+            (save_data.highscore, save_data.scoreboard)
+        }
+        Err(e) => {
+            eprintln!("Failed to load game data: {}", e);
+            (None, Vec::new())
+        }
+    };
+    
     commands.spawn(parkour_objective);
 
     let globals = Globals {
         scoreboard_layer: parkour_objective_layer,
-        highscore: None,
+        highscore,
     };
+    
+    let mut score_tracker = ScoreTracker::default();
+    for (name, score) in &scoreboard {
+        score_tracker.scores.insert(name.clone(), *score);
+    }
+    score_tracker.last_saved_top_15 = scoreboard;
+    
     commands.insert_resource(globals);
+    commands.insert_resource(score_tracker);
 }
 
 fn init_clients(
@@ -234,6 +279,7 @@ fn reset_clients(
         Option<&Properties>,
     )>,
     mut globals: ResMut<Globals>,
+    score_tracker: Res<ScoreTracker>,
     mut commands: Commands,
 ) {
     for (
@@ -276,7 +322,21 @@ fn reset_clients(
                         seed: state.seed,
                         movements: state.movements.clone(),
                     };
+                    
                     globals.highscore = Some(highscore);
+                    
+                    // Get current top 15 from score tracker
+                    let mut current_top_15: Vec<(String, i32)> = score_tracker.scores.iter()
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect();
+                    current_top_15.sort_by(|a, b| b.1.cmp(&a.1));
+                    current_top_15.truncate(15);
+                    
+                    // Save the highscore along with current scoreboard
+                    if let Err(e) = save_game_data(&globals.highscore, &current_top_15) {
+                        eprintln!("Failed to save highscore: {}", e);
+                    }
+                    
                     client.send_chat_message(
                         "NEW GLOBAL HIGHSCORE! ".color(Color::GOLD).bold()
                             + format!("Score: {} - Your run has been saved!", state.score)
@@ -351,6 +411,7 @@ fn manage_blocks(
     )>,
     mut objectives: Query<&mut ObjectiveScores, With<Objective>>,
     globals: Res<Globals>,
+    mut score_tracker: ResMut<ScoreTracker>,
     mut commands: Commands,
 ) {
     for (entity, mut client, mut pos, mut state, mut layer, username, existing_replay_mode) in
@@ -558,12 +619,36 @@ fn manage_blocks(
                 let mut objective_mut = objectives.single_mut();
                 let name = username.to_string();
                 let new_score = state.score as i32;
+                
+                // Update objective scores
                 if let Some(score) = objective_mut.get(&name) {
                     if *score < new_score {
-                        objective_mut.insert(name, new_score);
+                        objective_mut.insert(name.clone(), new_score);
                     }
                 } else {
-                    objective_mut.insert(name, new_score);
+                    objective_mut.insert(name.clone(), new_score);
+                }
+                
+                // Update score tracker
+                let old_score = score_tracker.scores.get(&name).copied().unwrap_or(0);
+                if new_score > old_score {
+                    score_tracker.scores.insert(name, new_score);
+                    
+                    // Check if top 15 changed
+                    let mut current_top_15: Vec<(String, i32)> = score_tracker.scores.iter()
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect();
+                    current_top_15.sort_by(|a, b| b.1.cmp(&a.1));
+                    current_top_15.truncate(15);
+                    
+                    if current_top_15 != score_tracker.last_saved_top_15 {
+                        // Save the updated scoreboard
+                        if let Err(e) = save_game_data(&globals.highscore, &current_top_15) {
+                            eprintln!("Failed to save game data: {}", e);
+                        } else {
+                            score_tracker.last_saved_top_15 = current_top_15;
+                        }
+                    }
                 }
             }
         }
@@ -799,6 +884,7 @@ fn handle_disconnected_clients(
     mut disconnected_clients: RemovedComponents<Client>,
     query: Query<(&GameState, &Username, Option<&ReplayMode>)>,
     mut globals: ResMut<Globals>,
+    score_tracker: Res<ScoreTracker>,
     mut commands: Commands,
 ) {
     for entity in disconnected_clients.read() {
@@ -817,7 +903,21 @@ fn handle_disconnected_clients(
                     seed: state.seed,
                     movements: state.movements.clone(),
                 };
+                
                 globals.highscore = Some(highscore);
+                
+                // Get current top 15 from score tracker
+                let mut current_top_15: Vec<(String, i32)> = score_tracker.scores.iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect();
+                current_top_15.sort_by(|a, b| b.1.cmp(&a.1));
+                current_top_15.truncate(15);
+                
+                // Save the highscore along with current scoreboard
+                if let Err(e) = save_game_data(&globals.highscore, &current_top_15) {
+                    eprintln!("Failed to save highscore: {}", e);
+                }
+                
                 println!("Player {} disconnected with new highscore: {}", username, state.score);
             }
 
@@ -829,4 +929,36 @@ fn handle_disconnected_clients(
             }
         }
     }
+}
+
+
+
+fn save_game_data(highscore: &Option<HighScore>, scoreboard: &[(String, i32)]) -> Result<(), Box<dyn std::error::Error>> {
+    // Only save top 15 scores
+    let top_15: Vec<(String, i32)> = scoreboard.iter()
+        .take(15)
+        .cloned()
+        .collect();
+    
+    let save_data = SaveData {
+        highscore: highscore.clone(),
+        scoreboard: top_15,
+    };
+    let data = bincode::serialize(&save_data)?;
+    fs::write("gamedata.dat", data)?;
+    Ok(())
+}
+
+fn load_game_data() -> Result<SaveData, Box<dyn std::error::Error>> {
+    let path = Path::new("gamedata.dat");
+    if !path.exists() {
+        return Ok(SaveData {
+            highscore: None,
+            scoreboard: Vec::new(),
+        });
+    }
+    
+    let data = fs::read(path)?;
+    let save_data = bincode::deserialize(&data)?;
+    Ok(save_data)
 }
