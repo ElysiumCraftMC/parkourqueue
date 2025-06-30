@@ -12,6 +12,7 @@ use valence::entity::entity::Flags;
 use valence::entity::player::PlayerEntityBundle;
 use valence::player_list::{DisplayName, Listed, PlayerListEntryBundle};
 use valence::prelude::*;
+use bevy_ecs::removal_detection::RemovedComponents;
 use valence::protocol::WritePacket;
 use valence::protocol::packets::play::{
     TeamS2c,
@@ -62,7 +63,7 @@ pub fn main() {
                 manage_blocks,
                 record_player_movements.after(manage_blocks),
                 update_replay_npcs.after(record_player_movements),
-                despawn_disconnected_clients,
+                handle_disconnected_clients,
                 setup_no_collision_team,
             ),
         )
@@ -791,5 +792,41 @@ fn setup_no_collision_team(
 
     for mut client in &mut all_clients {
         client.write_packet(&add_packet);
+    }
+}
+
+fn handle_disconnected_clients(
+    mut disconnected_clients: RemovedComponents<Client>,
+    query: Query<(&GameState, &Username, Option<&ReplayMode>)>,
+    mut globals: ResMut<Globals>,
+    mut commands: Commands,
+) {
+    for entity in disconnected_clients.read() {
+        if let Ok((state, username, replay_mode)) = query.get(entity) {
+            // Check if this is a new global highscore
+            let is_new_highscore = if let Some(ref existing_highscore) = globals.highscore {
+                state.score > existing_highscore.score
+            } else {
+                state.score > 0
+            };
+
+            if is_new_highscore {
+                let highscore = HighScore {
+                    username: username.to_string(),
+                    score: state.score,
+                    seed: state.seed,
+                    movements: state.movements.clone(),
+                };
+                globals.highscore = Some(highscore);
+                println!("Player {} disconnected with new highscore: {}", username, state.score);
+            }
+
+            // Despawn the NPC belonging to this player when they disconnect
+            if let Some(replay) = replay_mode {
+                if let Some(npc_entity) = replay.spawned_npc {
+                    commands.entity(npc_entity).insert(Despawned);
+                }
+            }
+        }
     }
 }
