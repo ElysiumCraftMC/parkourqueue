@@ -8,6 +8,7 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use valence::client::Properties;
 use valence::entity::HeadYaw;
+use valence::entity::entity::Flags;
 use valence::entity::player::PlayerEntityBundle;
 use valence::player_list::{DisplayName, Listed, PlayerListEntryBundle};
 use valence::prelude::*;
@@ -62,7 +63,6 @@ pub fn main() {
                 record_player_movements.after(manage_blocks),
                 update_replay_npcs.after(record_player_movements),
                 despawn_disconnected_clients,
-                apply_custom_skin,
                 setup_no_collision_team,
             ),
         )
@@ -89,8 +89,6 @@ struct HighScore {
     score: u32,
     seed: u64,
     movements: Vec<PlayerMovement>,
-    skin_textures: Option<String>,
-    skin_signature: Option<String>,
 }
 
 #[derive(Component)]
@@ -204,20 +202,21 @@ fn init_clients(
         commands
             .entity(entity)
             .insert((state, layer, entity_layer, NoCollisionTeam));
-            
+
         // Send welcome message
+        client.send_chat_message("Welcome to Parkour Queue!".color(Color::GOLD).bold());
         client.send_chat_message(
-            "Welcome to Parkour Queue!".color(Color::GOLD).bold()
+            "Jump on the ".color(Color::WHITE)
+                + "GOLD BLOCK".color(Color::GOLD).bold()
+                + " to race against the champion!".color(Color::WHITE),
         );
         client.send_chat_message(
-            "Jump on the ".color(Color::WHITE) + "GOLD BLOCK".color(Color::GOLD).bold() + " to race against the champion!".color(Color::WHITE)
+            "The champion's ghost will appear and replay their best run."
+                .italic()
+                .color(Color::GRAY),
         );
-        client.send_chat_message(
-            "The champion's ghost will appear and replay their best run.".italic().color(Color::GRAY)
-        );
-        client.send_chat_message(
-            "Beat their score to become the new champion!".color(Color::GREEN)
-        );
+        client
+            .send_chat_message("Beat their score to become the new champion!".color(Color::GREEN));
     }
 }
 
@@ -270,24 +269,11 @@ fn reset_clients(
                 };
 
                 if is_new_highscore {
-                    // Get player's skin data if available
-                    let (skin_textures, skin_signature) = if let Some(props) = properties {
-                        if let Some(texture_prop) = props.textures() {
-                            (Some(texture_prop.value.clone()), texture_prop.signature.clone())
-                        } else {
-                            (None, None)
-                        }
-                    } else {
-                        (None, None)
-                    };
-                    
                     let highscore = HighScore {
                         username: username.to_string(),
                         score: state.score,
                         seed: state.seed,
                         movements: state.movements.clone(),
-                        skin_textures,
-                        skin_signature,
                     };
                     globals.highscore = Some(highscore);
                     client.send_chat_message(
@@ -435,6 +421,11 @@ fn manage_blocks(
 
                     let npc_id = UniqueId::default();
 
+                    // Create entity flags with glowing and invisibility
+                    let mut flags = Flags::default();
+                    flags.set_glowing(true);
+                    flags.set_invisible(true);
+
                     // Spawn the player entity with replay component
                     let entity_bundle = PlayerEntityBundle {
                         layer: EntityLayerId(entity),
@@ -442,6 +433,7 @@ fn manage_blocks(
                         position: npc_pos,
                         look: Look::new(npc_yaw, npc_pitch),
                         head_yaw: HeadYaw(npc_yaw),
+                        entity_flags: flags,
                         ..Default::default()
                     };
 
@@ -456,19 +448,12 @@ fn manage_blocks(
                         owner_entity: entity,
                     };
 
-                    // Create Properties with the highscore player's skin
-                    let mut npc_properties = Properties::default();
-                    if let (Some(textures), Some(signature)) = (&highscore.skin_textures, &highscore.skin_signature) {
-                        npc_properties.set_skin(textures, signature);
-                    }
-                    
                     let npc_entity = commands
                         .spawn((
                             entity_bundle,
                             replay_component,
                             GameMode::Spectator,
                             NoCollisionTeam,
-                            npc_properties,
                         ))
                         .id();
 
@@ -513,7 +498,7 @@ fn manage_blocks(
                         )
                         .color(Color::GOLD),
                     );
-                    
+
                     // Teleport player back to spawn
                     pos.set([
                         START_POS.x as f64 + 0.5,
@@ -756,15 +741,6 @@ fn update_replay_npcs(
             look.pitch = current_movement.pitch;
             head_yaw.0 = look.yaw;
         }
-    }
-}
-
-fn apply_custom_skin(mut query: Query<&mut Properties, (Added<Properties>, Without<Client>)>) {
-    for mut props in &mut query {
-        props.set_skin(
-            "ewogICJ0aW1lc3RhbXAiIDogMTY5MTcwNjU3MzE1NiwKICAicHJvZmlsZUlkIiA6ICJlODgyNzRlYjNmNTE0ZDYwYmMxYWQ5NTQ4MTIxODMwMyIsCiAgInByb2ZpbGVOYW1lIiA6ICJBbmltYWxUaGVHYW1lciIsCiAgInNpZ25hdHVyZVJlcXVpcmVkIiA6IHRydWUsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS8xZGUyYzgzZjhmNGZiMzgwNjlmNTVmNTJlNGY4ZWU1ZjA4NjcyMjllYWQ5MWI3ZTc5ZGVmNzU0YjcwZWE5NDMzIiwKICAgICAgIm1ldGFkYXRhIiA6IHsKICAgICAgICAibW9kZWwiIDogInNsaW0iCiAgICAgIH0KICAgIH0KICB9Cn0=",
-            "k/g8JTYB0A5O+h8+XSdw3QFEVHnzomDsGl6eubV/sE396yAL7E4qCT24r3Uv88YYforuET1BXG0GBOewcij3uMajm+mc/P7v+0+C+NSS9g5dpSs2e9MdeGZBgDEr1kTnXzQmayZUvLGitW23GuRDHdVHx76JZpxBk3q0VsjgncNs6UVZwfYNCaUGZZx38bqG5FXGxE0MfFHKiJawKwWRaoAbHjrfsByLipIKUhssUF3pt+HPWbgaOD2rO0EOLBrGzvEnu9oeLPH4tqdlvurjGrdpM4wKCmS3j8K91OBTABciVR9xt0fRnhbL4JoZuLK+iefNXx8nBCVEOm9sNk4pXHNWZvKEkqMb3jvpxuYHsSZPm0IdN+74FEmjHy0sY/7+ZG/h/IUHs4CyrPAtR/rqON6MG8nVVBxUq4kWV+2Xj+U+O02gQUVFqMM77AqArRsPIkeFIgVQ6+WvBZYXuRe1Ryo6qwjmYGc4AeTZTtvafzv8vfAMFfJJmT69nkTTDO5hAtDTUnCd86nNFQ3qijdO9CW7OFDyysb9M0a1O7pQ7Nu10rkNwY+6uTfKoATtT80+RoMzvKwcIAG4cY+PR5jhsKP+sf+AEymovD+cPVnLOuZQ6bAyKW6yjf9Xd0vyirCgNaU1CGmDE1mihGK2kC0fm11RaoDbyKvMcLKAq+OFos0=",
-        );
     }
 }
 
