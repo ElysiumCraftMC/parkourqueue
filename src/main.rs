@@ -1,11 +1,12 @@
-use std::collections::{VecDeque, HashMap};
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::fs;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::fs;
-use std::path::Path;
-use serde::{Serialize, Deserialize};
 
+use bevy_ecs::removal_detection::RemovedComponents;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -15,7 +16,6 @@ use valence::entity::entity::Flags;
 use valence::entity::player::PlayerEntityBundle;
 use valence::player_list::{DisplayName, Listed, PlayerListEntryBundle};
 use valence::prelude::*;
-use bevy_ecs::removal_detection::RemovedComponents;
 use valence::protocol::WritePacket;
 use valence::protocol::packets::play::{
     TeamS2c,
@@ -67,6 +67,7 @@ pub fn main() {
                 record_player_movements.after(manage_blocks),
                 update_replay_npcs.after(record_player_movements),
                 handle_disconnected_clients,
+                cleanup_ghost_player_list_entries,
                 setup_no_collision_team,
             ),
         )
@@ -132,19 +133,18 @@ struct ReplayNpc {
 
 #[derive(Component)]
 struct ReplayMode {
-    original_seed: u64,
     spawned_npc: Option<Entity>,
 }
 
 #[derive(Component)]
 struct NoCollisionTeam;
 
-fn setup(
-    mut commands: Commands,
-    server: Res<Server>,
-    dimensions: Res<DimensionTypeRegistry>,
-    biomes: Res<BiomeRegistry>,
-) {
+#[derive(Component)]
+struct GhostPlayerListEntry {
+    ghost_entity: Entity,
+}
+
+fn setup(mut commands: Commands, server: Res<Server>) {
     let parkour_objective_layer = commands.spawn(EntityLayer::new(&server)).id();
     let mut parkour_objective = ObjectiveBundle {
         name: Objective::new("parkour-jumps"),
@@ -152,7 +152,7 @@ fn setup(
         layer: EntityLayerId(parkour_objective_layer),
         ..Default::default()
     };
-    
+
     // Load game data from file
     let (highscore, scoreboard) = match load_game_data() {
         Ok(save_data) => {
@@ -160,12 +160,12 @@ fn setup(
                 println!("Loaded highscore: {} by {}", h.score, h.username);
             }
             println!("Loaded {} scoreboard entries", save_data.scoreboard.len());
-            
+
             // Populate the objective scores
             for (name, score) in &save_data.scoreboard {
                 parkour_objective.scores.insert(name.clone(), *score);
             }
-            
+
             (save_data.highscore, save_data.scoreboard)
         }
         Err(e) => {
@@ -173,20 +173,20 @@ fn setup(
             (None, Vec::new())
         }
     };
-    
+
     commands.spawn(parkour_objective);
 
     let globals = Globals {
         scoreboard_layer: parkour_objective_layer,
         highscore,
     };
-    
+
     let mut score_tracker = ScoreTracker::default();
     for (name, score) in &scoreboard {
         score_tracker.scores.insert(name.clone(), *score);
     }
     score_tracker.last_saved_top_15 = scoreboard;
-    
+
     commands.insert_resource(globals);
     commands.insert_resource(score_tracker);
 }
@@ -291,7 +291,7 @@ fn reset_clients(
         mut layer,
         username,
         replay_mode,
-        properties,
+        _properties,
     ) in &mut clients
     {
         let out_of_bounds = (pos.0.y as i32) < START_POS.y - 32;
@@ -322,21 +322,23 @@ fn reset_clients(
                         seed: state.seed,
                         movements: state.movements.clone(),
                     };
-                    
+
                     globals.highscore = Some(highscore);
-                    
+
                     // Get current top 15 from score tracker
-                    let mut current_top_15: Vec<(String, i32)> = score_tracker.scores.iter()
+                    let mut current_top_15: Vec<(String, i32)> = score_tracker
+                        .scores
+                        .iter()
                         .map(|(k, v)| (k.clone(), *v))
                         .collect();
                     current_top_15.sort_by(|a, b| b.1.cmp(&a.1));
                     current_top_15.truncate(15);
-                    
+
                     // Save the highscore along with current scoreboard
                     if let Err(e) = save_game_data(&globals.highscore, &current_top_15) {
                         eprintln!("Failed to save highscore: {}", e);
                     }
-                    
+
                     client.send_chat_message(
                         "NEW GLOBAL HIGHSCORE! ".color(Color::GOLD).bold()
                             + format!("Score: {} - Your run has been saved!", state.score)
@@ -438,7 +440,6 @@ fn manage_blocks(
                     }
 
                     // Store original seed and switch to highscore seed
-                    let original_seed = state.seed;
                     state.seed = highscore.seed;
                     state.rng = StdRng::seed_from_u64(highscore.seed);
                     state.score = 0;
@@ -521,7 +522,6 @@ fn manage_blocks(
 
                     // Add replay mode component to the player with reference to the spawned NPC
                     commands.entity(entity).insert(ReplayMode {
-                        original_seed,
                         spawned_npc: Some(npc_entity),
                     });
 
@@ -533,17 +533,22 @@ fn manage_blocks(
                         format!("{} Ghost", &highscore.username)
                     };
 
-                    commands.spawn(PlayerListEntryBundle {
-                        uuid: npc_id,
-                        username: Username(ghost_name.chars().take(16).collect::<String>()),
-                        display_name: DisplayName(
-                            format!("{}'s Ghost ({})", highscore.username, highscore.score)
-                                .color(Color::GOLD)
-                                .into(),
-                        ),
-                        listed: Listed(false), // Don't show in player list
-                        ..Default::default()
-                    });
+                    commands.spawn((
+                        PlayerListEntryBundle {
+                            uuid: npc_id,
+                            username: Username(ghost_name.chars().take(16).collect::<String>()),
+                            display_name: DisplayName(
+                                format!("{}'s Ghost ({})", highscore.username, highscore.score)
+                                    .color(Color::GOLD)
+                                    .into(),
+                            ),
+                            listed: Listed(false), // Don't show in player list
+                            ..Default::default()
+                        },
+                        GhostPlayerListEntry {
+                            ghost_entity: npc_entity,
+                        },
+                    ));
 
                     client.play_sound(
                         Sound::EntityPlayerLevelup,
@@ -619,7 +624,7 @@ fn manage_blocks(
                 let mut objective_mut = objectives.single_mut();
                 let name = username.to_string();
                 let new_score = state.score as i32;
-                
+
                 // Update objective scores
                 if let Some(score) = objective_mut.get(&name) {
                     if *score < new_score {
@@ -628,19 +633,21 @@ fn manage_blocks(
                 } else {
                     objective_mut.insert(name.clone(), new_score);
                 }
-                
+
                 // Update score tracker
                 let old_score = score_tracker.scores.get(&name).copied().unwrap_or(0);
                 if new_score > old_score {
                     score_tracker.scores.insert(name, new_score);
-                    
+
                     // Check if top 15 changed
-                    let mut current_top_15: Vec<(String, i32)> = score_tracker.scores.iter()
+                    let mut current_top_15: Vec<(String, i32)> = score_tracker
+                        .scores
+                        .iter()
                         .map(|(k, v)| (k.clone(), *v))
                         .collect();
                     current_top_15.sort_by(|a, b| b.1.cmp(&a.1));
                     current_top_15.truncate(15);
-                    
+
                     if current_top_15 != score_tracker.last_saved_top_15 {
                         // Save the updated scoreboard
                         if let Err(e) = save_game_data(&globals.highscore, &current_top_15) {
@@ -903,22 +910,27 @@ fn handle_disconnected_clients(
                     seed: state.seed,
                     movements: state.movements.clone(),
                 };
-                
+
                 globals.highscore = Some(highscore);
-                
+
                 // Get current top 15 from score tracker
-                let mut current_top_15: Vec<(String, i32)> = score_tracker.scores.iter()
+                let mut current_top_15: Vec<(String, i32)> = score_tracker
+                    .scores
+                    .iter()
                     .map(|(k, v)| (k.clone(), *v))
                     .collect();
                 current_top_15.sort_by(|a, b| b.1.cmp(&a.1));
                 current_top_15.truncate(15);
-                
+
                 // Save the highscore along with current scoreboard
                 if let Err(e) = save_game_data(&globals.highscore, &current_top_15) {
                     eprintln!("Failed to save highscore: {}", e);
                 }
-                
-                println!("Player {} disconnected with new highscore: {}", username, state.score);
+
+                println!(
+                    "Player {} disconnected with new highscore: {}",
+                    username, state.score
+                );
             }
 
             // Despawn the NPC belonging to this player when they disconnect
@@ -931,15 +943,13 @@ fn handle_disconnected_clients(
     }
 }
 
-
-
-fn save_game_data(highscore: &Option<HighScore>, scoreboard: &[(String, i32)]) -> Result<(), Box<dyn std::error::Error>> {
+fn save_game_data(
+    highscore: &Option<HighScore>,
+    scoreboard: &[(String, i32)],
+) -> Result<(), Box<dyn std::error::Error>> {
     // Only save top 15 scores
-    let top_15: Vec<(String, i32)> = scoreboard.iter()
-        .take(15)
-        .cloned()
-        .collect();
-    
+    let top_15: Vec<(String, i32)> = scoreboard.iter().take(15).cloned().collect();
+
     let save_data = SaveData {
         highscore: highscore.clone(),
         scoreboard: top_15,
@@ -957,8 +967,24 @@ fn load_game_data() -> Result<SaveData, Box<dyn std::error::Error>> {
             scoreboard: Vec::new(),
         });
     }
-    
+
     let data = fs::read(path)?;
     let save_data = bincode::deserialize(&data)?;
     Ok(save_data)
+}
+
+fn cleanup_ghost_player_list_entries(
+    mut commands: Commands,
+    mut removed_ghosts: RemovedComponents<ReplayNpc>,
+    player_list_entries: Query<(Entity, &GhostPlayerListEntry)>,
+) {
+    for removed_ghost in removed_ghosts.read() {
+        // Find and despawn the associated player list entry
+        for (entry_entity, ghost_entry) in &player_list_entries {
+            if ghost_entry.ghost_entity == removed_ghost {
+                println!("despwaning");
+                commands.entity(entry_entity).insert(Despawned);
+            }
+        }
+    }
 }
