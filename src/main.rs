@@ -982,7 +982,6 @@ fn cleanup_ghost_player_list_entries(
         // Find and despawn the associated player list entry
         for (entry_entity, ghost_entry) in &player_list_entries {
             if ghost_entry.ghost_entity == removed_ghost {
-                println!("despwaning");
                 commands.entity(entry_entity).insert(Despawned);
             }
         }
