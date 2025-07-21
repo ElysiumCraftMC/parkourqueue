@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy_ecs::removal_detection::RemovedComponents;
 use mimalloc::MiMalloc;
+use rand::prelude::IndexedRandom;
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use valence::client::Properties;
 use valence::entity::HeadYaw;
@@ -711,16 +711,16 @@ fn generate_next_block(state: &mut GameState, layer: &mut ChunkLayer, in_game: b
 
 fn generate_random_block(pos: BlockPos, target_y: i32, rng: &mut StdRng) -> BlockPos {
     let y = match target_y {
-        0 => rng.gen_range(-1..2),
+        0 => rng.random_range(-1..2),
         y if y > pos.y => 1,
         _ => -1,
     };
     let z = match y {
-        1 => rng.gen_range(1..3),
-        -1 => rng.gen_range(2..5),
-        _ => rng.gen_range(1..4),
+        1 => rng.random_range(1..3),
+        -1 => rng.random_range(2..5),
+        _ => rng.random_range(1..4),
     };
-    let x = rng.gen_range(-3..4);
+    let x = rng.random_range(-3..4);
 
     BlockPos::new(pos.x + x, pos.y + y, pos.z + z)
 }
@@ -958,7 +958,7 @@ fn save_game_data(
         highscore: highscore.clone(),
         scoreboard: top_15,
     };
-    let data = bincode::serialize(&save_data)?;
+    let data = bincode::serde::encode_to_vec(&save_data, bincode::config::legacy())?;
     fs::write("gamedata.dat", data)?;
     Ok(())
 }
@@ -973,8 +973,8 @@ fn load_game_data() -> Result<SaveData, Box<dyn std::error::Error>> {
     }
 
     let data = fs::read(path)?;
-    let save_data = bincode::deserialize(&data)?;
-    Ok(save_data)
+    let save_data = bincode::serde::decode_from_slice(&data, bincode::config::legacy())?;
+    Ok(save_data.0)
 }
 
 fn cleanup_ghost_player_list_entries(
