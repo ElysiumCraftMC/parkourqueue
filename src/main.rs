@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy_ecs::removal_detection::RemovedComponents;
+use mimalloc::MiMalloc;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -31,6 +32,9 @@ const START_POS: BlockPos = BlockPos::new(0, 100, 0);
 const VIEW_DIST: u8 = 10;
 
 const BLOCK_TYPES: [BlockState; 1] = [BlockState::OBSIDIAN];
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 pub fn main() {
     let connection_mode = match std::env::var("VELOCITY_SECRET") {
