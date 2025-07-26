@@ -73,6 +73,7 @@ pub fn main() {
                 handle_disconnected_clients,
                 cleanup_ghost_player_list_entries,
                 setup_no_collision_team,
+                debug_entity_counts,
             ),
         )
         .run();
@@ -354,7 +355,7 @@ fn reset_clients(
             // Despawn the NPC belonging to this player when they fall
             if let Some(replay) = replay_mode {
                 if let Some(npc_entity) = replay.spawned_npc {
-                    commands.entity(npc_entity).insert(Despawned);
+                    commands.entity(npc_entity).despawn();
                 }
             }
 
@@ -439,7 +440,7 @@ fn manage_blocks(
                     // Remove any existing NPC for this player
                     if let Some(replay_mode) = existing_replay_mode {
                         if let Some(existing_npc) = replay_mode.spawned_npc {
-                            commands.entity(existing_npc).insert(Despawned);
+                            commands.entity(existing_npc).despawn();
                         }
                     }
 
@@ -447,6 +448,8 @@ fn manage_blocks(
                     state.seed = highscore.seed;
                     state.rng = StdRng::seed_from_u64(highscore.seed);
                     state.score = 0;
+                    // Don't clear movements here - we need them for potential highscore
+                    state.recording_started = false;
 
                     // Clear and regenerate the parkour with the highscore seed
                     for block in &state.blocks {
@@ -553,6 +556,8 @@ fn manage_blocks(
                             ghost_entity: npc_entity,
                         },
                     ));
+                    
+
 
                     client.play_sound(
                         Sound::EntityPlayerLevelup,
@@ -741,6 +746,16 @@ fn record_player_movements(mut clients: Query<(&Position, &Look, &mut GameState)
             };
 
             state.movements.push(movement);
+            
+            // Limit movements to prevent unbounded memory growth
+            // 30 minutes of gameplay at 20 TPS = 36000 movements
+            const MAX_MOVEMENTS: usize = 36000;
+            if state.movements.len() > MAX_MOVEMENTS {
+                // Remove oldest movements
+                let excess = state.movements.len() - MAX_MOVEMENTS;
+                state.movements.drain(0..excess);
+
+            }
         }
     }
 }
@@ -776,7 +791,7 @@ fn update_replay_npcs(
         }
         // Check if movements vector is empty
         if replay.movements.is_empty() {
-            commands.entity(entity).insert(Despawned);
+            commands.entity(entity).despawn();
             continue;
         }
 
@@ -798,7 +813,7 @@ fn update_replay_npcs(
 
         if replay.current_index >= replay.movements.len() {
             // Replay finished, despawn the NPC
-            commands.entity(entity).insert(Despawned);
+            commands.entity(entity).despawn();
             continue;
         }
 
@@ -940,7 +955,7 @@ fn handle_disconnected_clients(
             // Despawn the NPC belonging to this player when they disconnect
             if let Some(replay) = replay_mode {
                 if let Some(npc_entity) = replay.spawned_npc {
-                    commands.entity(npc_entity).insert(Despawned);
+                    commands.entity(npc_entity).despawn();
                 }
             }
         }
@@ -982,12 +997,44 @@ fn cleanup_ghost_player_list_entries(
     mut removed_ghosts: RemovedComponents<ReplayNpc>,
     player_list_entries: Query<(Entity, &GhostPlayerListEntry)>,
 ) {
+    // Clean up based on removed ReplayNpc components
     for removed_ghost in removed_ghosts.read() {
         // Find and despawn the associated player list entry
         for (entry_entity, ghost_entry) in &player_list_entries {
             if ghost_entry.ghost_entity == removed_ghost {
-                commands.entity(entry_entity).insert(Despawned);
+                commands.entity(entry_entity).despawn();
             }
         }
+    }
+}
+
+fn debug_entity_counts(
+    mut timer: Local<u32>,
+    clients: Query<&Client>,
+    ghosts: Query<&ReplayNpc>,
+    player_list_entries: Query<&GhostPlayerListEntry>,
+    all_entities: Query<Entity>,
+    entity_layers: Query<&EntityLayer>,
+    chunk_layers: Query<&ChunkLayer>,
+) {
+    *timer += 1;
+    // Log every 5 seconds (100 ticks at 20 TPS)
+    if *timer % 100 == 0 {
+        println!(
+            "=== Entity Debug Info ===\n\
+             Total entities: {}\n\
+             Clients: {}\n\
+             Ghosts: {}\n\
+             Ghost player list entries: {}\n\
+             Entity layers: {}\n\
+             Chunk layers: {}\n\
+             ======================",
+            all_entities.iter().count(),
+            clients.iter().count(),
+            ghosts.iter().count(),
+            player_list_entries.iter().count(),
+            entity_layers.iter().count(),
+            chunk_layers.iter().count()
+        );
     }
 }
