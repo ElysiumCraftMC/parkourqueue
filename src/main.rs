@@ -17,6 +17,7 @@ use valence::entity::entity::Flags;
 use valence::entity::player::PlayerEntityBundle;
 use valence::player_list::{DisplayName, Listed, PlayerListEntryBundle};
 use valence::prelude::*;
+use valence::client::despawn_disconnected_clients;
 use valence::protocol::WritePacket;
 use valence::protocol::packets::play::{
     TeamS2c,
@@ -71,6 +72,7 @@ pub fn main() {
                 record_player_movements.after(manage_blocks),
                 update_replay_npcs.after(record_player_movements),
                 handle_disconnected_clients,
+                despawn_disconnected_clients,
                 cleanup_ghost_player_list_entries,
                 setup_no_collision_team,
                 debug_entity_counts,
@@ -355,7 +357,7 @@ fn reset_clients(
             // Despawn the NPC belonging to this player when they fall
             if let Some(replay) = replay_mode {
                 if let Some(npc_entity) = replay.spawned_npc {
-                    commands.entity(npc_entity).despawn();
+                    commands.entity(npc_entity).insert(Despawned);
                 }
             }
 
@@ -440,7 +442,7 @@ fn manage_blocks(
                     // Remove any existing NPC for this player
                     if let Some(replay_mode) = existing_replay_mode {
                         if let Some(existing_npc) = replay_mode.spawned_npc {
-                            commands.entity(existing_npc).despawn();
+                            commands.entity(existing_npc).insert(Despawned);
                         }
                     }
 
@@ -791,7 +793,7 @@ fn update_replay_npcs(
         }
         // Check if movements vector is empty
         if replay.movements.is_empty() {
-            commands.entity(entity).despawn();
+            commands.entity(entity).insert(Despawned);
             continue;
         }
 
@@ -813,7 +815,7 @@ fn update_replay_npcs(
 
         if replay.current_index >= replay.movements.len() {
             // Replay finished, despawn the NPC
-            commands.entity(entity).despawn();
+            commands.entity(entity).insert(Despawned);
             continue;
         }
 
@@ -955,7 +957,7 @@ fn handle_disconnected_clients(
             // Despawn the NPC belonging to this player when they disconnect
             if let Some(replay) = replay_mode {
                 if let Some(npc_entity) = replay.spawned_npc {
-                    commands.entity(npc_entity).despawn();
+                    commands.entity(npc_entity).insert(Despawned);
                 }
             }
         }
@@ -1002,6 +1004,7 @@ fn cleanup_ghost_player_list_entries(
         // Find and despawn the associated player list entry
         for (entry_entity, ghost_entry) in &player_list_entries {
             if ghost_entry.ghost_entity == removed_ghost {
+                // Player list entries are not in entity layers, so use despawn() directly
                 commands.entity(entry_entity).despawn();
             }
         }
@@ -1016,6 +1019,7 @@ fn debug_entity_counts(
     all_entities: Query<Entity>,
     entity_layers: Query<&EntityLayer>,
     chunk_layers: Query<&ChunkLayer>,
+    despawned: Query<Entity, With<Despawned>>,
 ) {
     *timer += 1;
     // Log every 5 seconds (100 ticks at 20 TPS)
@@ -1028,13 +1032,15 @@ fn debug_entity_counts(
              Ghost player list entries: {}\n\
              Entity layers: {}\n\
              Chunk layers: {}\n\
+             Despawned (pending): {}\n\
              ======================",
             all_entities.iter().count(),
             clients.iter().count(),
             ghosts.iter().count(),
             player_list_entries.iter().count(),
             entity_layers.iter().count(),
-            chunk_layers.iter().count()
+            chunk_layers.iter().count(),
+            despawned.iter().count()
         );
     }
 }
